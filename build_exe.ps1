@@ -32,7 +32,7 @@ $version = "$here\build\version.json"
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name "Lyriplayer" `
     --add-data "$here\fonts;fonts" --add-data "$version;." `
     --add-data "$here\LICENSE;." --add-data "$here\THIRD_PARTY_NOTICES.md;." --add-data "$here\licenses;licenses" `
-    --collect-submodules mutagen `
+    --collect-submodules mutagen --hidden-import truststore --hidden-import certifi `
     --workpath "$here\build" --specpath "$here\build" --distpath "$DistPath" `
     "$here\lyrics_player.py"
 if ($LASTEXITCODE -ne 0) { throw "exe を作れませんでした（PyInstaller）" }

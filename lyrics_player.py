@@ -1418,12 +1418,46 @@ class UpdateError(Exception):
     pass
 
 
+def _ssl_contexts():
+    """接続相手（GitHub）の証明書を確かめる方法の候補。上から順に試す（確かめること自体は省かない）
+    1. Windows 自身の確認の仕組み（truststore）：ブラウザと同じように確かめられる。
+       Windows が必要な証明書をその場で取り寄せる場合や、ウイルス対策ソフトが通信を検査している場合にも対応できる
+    2. Python 用の証明書の一覧（certifi）
+    3. Python の標準"""
+    import ssl
+    ctxs = []
+    try:
+        import truststore
+        ctxs.append(truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    except Exception:
+        pass
+    try:
+        import certifi
+        ctxs.append(ssl.create_default_context(cafile=certifi.where()))
+    except Exception:
+        pass
+    ctxs.append(ssl.create_default_context())
+    return ctxs
+
+
 def _http_get(url, timeout=30):
+    import ssl
     import urllib.request
     import urllib.error
     req = urllib.request.Request(url, headers={"User-Agent": APP, "Accept": "application/vnd.github+json"})
     try:
-        return urllib.request.urlopen(req, timeout=timeout)
+        last = None
+        for ctx in _ssl_contexts():
+            try:
+                return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+            except urllib.error.URLError as e:
+                if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                    raise
+                last = e  # 証明書を確かめられなかった：次の方法で確かめ直す
+        raise UpdateError(
+            "接続先が本物の GitHub か確かめられなかったので、つなぐのをやめました（証明書の確認に失敗）。\n"
+            "ウイルス対策ソフトの「通信の検査（HTTPS スキャン）」などが原因のことがあります。\n"
+            f"（{getattr(last, 'reason', last)}）")
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise UpdateError("まだ公開されている版がありません。")
