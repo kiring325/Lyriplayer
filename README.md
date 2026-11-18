@@ -25,7 +25,7 @@
 
 **そのほか**
 - 歌詞・リスト・タイミング・設定のバックアップと復元（zip）
-- 設定画面からアップデート
+- 設定画面からアップデート（GitHub で公開している最新版をダウンロードして入れ替え）
 
 ## 使い方
 
@@ -55,6 +55,12 @@ python lyrics_player.py
 
 `-Install` を付けると、必要な部品（PySide6・mutagen・PyInstaller）も自動で入れます。
 `dist\Lyriplayer.exe` ができます（フォントは exe の中に入ります）。
+
+## 新しい版の公開（開発する人向け）
+
+`main` に変更が入ると、GitHub Actions（`.github/workflows/release.yml`）が Windows で exe を作り、
+[Releases](https://github.com/kiring325/Lyriplayer/releases) に新しい版として公開します。
+版の番号は `v年.月.日.通し番号` です。アプリはこの最新版を確認して、アップデートします。
 
 ## ライセンス
 

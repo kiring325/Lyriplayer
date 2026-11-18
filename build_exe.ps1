@@ -1,7 +1,7 @@
 ﻿# Lyriplayer（歌詞プレイヤー）を 1 つの exe にする（Windows で実行）
 #   使い方: PowerShell でこのフォルダを開いて  .\build_exe.ps1
 #   必要なもの: pip install -r requirements.txt pyinstaller（-Install を付けると自動で入れます）
-#   アプリの「アップデート」からは  -DistPath <作る場所> -Install  を付けて呼ばれます
+#   GitHub の自動ビルドでは、環境変数 LYRIPLAYER_VERSION（例 v2026.11.18.5）に版の番号を入れて呼びます
 param(
     [string]$DistPath = "",
     [switch]$Install
@@ -21,15 +21,12 @@ if ($Install) {
     if ($LASTEXITCODE -ne 0) { throw "必要な部品を入れられませんでした（pip）" }
 }
 
-# 版の情報（アプリの設定画面に出す・アップデートの確認に使う）
+# 版の情報（アプリの設定画面に出す・アップデートの確認に使う）。自分でビルドしたものは版の番号が空になる
 New-Item -ItemType Directory -Force "$here\build" | Out-Null
-$commit = ""; $branch = ""
-try {
-    $commit = (git -C $here rev-parse HEAD 2>$null)
-    $branch = (git -C $here rev-parse --abbrev-ref HEAD 2>$null)
-} catch { }
+$commit = ""
+try { $commit = (git -C $here rev-parse HEAD 2>$null) } catch { }
 $version = "$here\build\version.json"
-@{ commit = "$commit".Trim(); branch = "$branch".Trim(); date = (Get-Date -Format "yyyy-MM-dd HH:mm") } |
+@{ version = "$env:LYRIPLAYER_VERSION".Trim(); commit = "$commit".Trim(); date = (Get-Date -Format "yyyy-MM-dd HH:mm") } |
     ConvertTo-Json | Set-Content -Encoding UTF8 $version
 
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name "Lyriplayer" `

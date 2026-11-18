@@ -6,7 +6,9 @@
 - タイミング計算は `ScrollModel`：歌い出し/歌い終わり・フレーズの印（`marks`）・区切り（`---` 行）から、再生時刻 ⇔ スクロール位置を求める。
 - exe は Windows 上で `build_exe.ps1`（PyInstaller、onefile）。クラウドやスマホからの作業ではビルド・GUI 確認はできないので、
   変更後は `python -m py_compile lyrics_player.py` と、`QT_QPA_PLATFORM=offscreen` で画面を出さないテストで確かめる。
-- アプリ内アップデート：`GitUpdater`（git fetch → ブランチを切り替え）→ `build_exe.ps1 -DistPath … -Install` → `launch_swap` で exe を入れ替え。
-  版の情報は build_exe.ps1 が `build/version.json` に書いて exe に埋め込む（`app_version()`）。build_exe.ps1 は BOM 付き UTF-8 で保存する。
+- 公開：`main` に入ると `.github/workflows/release.yml` が exe を作って Releases に公開（タグ `v年.月.日.通し番号`）。
+  build_exe.ps1 は環境変数 `LYRIPLAYER_VERSION` を `build/version.json` に書いて exe に埋め込む（`app_version()`）。build_exe.ps1 は BOM 付き UTF-8 で保存する。
+- アプリ内アップデート：`fetch_latest_release()`（GitHub API の releases/latest）→ `download_release()`（大きさと SHA-256 を確認）→ `launch_swap()` で exe を入れ替え。
+- 作業はブランチで行い、プルリクエストで `main` に入れる（`main` に入ると利用者に配られる）。
 - アイコンは画像ファイルを使わず `icon_pixmap()` で描く（24×24 の升目で設計）。他人の素材画像はリポジトリに入れない。
 - `dist/` `build/` はコミットしない。

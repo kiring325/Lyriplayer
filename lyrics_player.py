@@ -38,7 +38,6 @@ import sqlite3
 import zipfile
 import tempfile
 import subprocess
-import shutil
 import ctypes
 from ctypes import wintypes
 from pathlib import Path
@@ -1392,14 +1391,17 @@ def restart_app():
 
 
 # ---------------------------------------------------------------- アップデート
-# GitHub のリポジトリから最新版を取り込み、この PC で exe を作り直して入れ替える。
-# リポジトリは非公開なので、ダウンロードには git（ログイン済み）を使い、exe の作成には Python と PyInstaller を使う
+# GitHub の Releases に置いた最新の exe をダウンロードして、今の exe と入れ替える。
+# exe は GitHub の自動ビルド（.github/workflows/release.yml）が main に変更が入るたびに作って置く
+UPDATE_REPO = "kiring325/Lyriplayer"
+RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases"
+LATEST_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_ASSET = APP + ".exe"
 CREATE_NO_WINDOW = 0x08000000  # 裏で動かすコマンドの黒い画面を出さない
-UPDATE_AUTO_BRANCH = ""        # 「いちばん新しく更新されたブランチ」を選ぶ
 
 
 def app_version():
-    """exe に埋め込んだ版の情報 {"commit", "branch", "date"}。無ければ {}（前のビルドや、Python から起動したとき）"""
+    """exe に埋め込んだ版の情報 {"version", "commit", "date"}。無ければ {}（Python から起動したときなど）"""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     try:
         return json.loads((base / "version.json").read_text(encoding="utf-8-sig"))
@@ -1407,128 +1409,77 @@ def app_version():
         return {}
 
 
-def find_git():
-    g = shutil.which("git")
-    if g:
-        return g
-    for c in (r"C:\Program Files\Git\cmd\git.exe", r"C:\Program Files (x86)\Git\cmd\git.exe",
-              os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\cmd\git.exe")):
-        if os.path.isfile(c):
-            return c
-    return None
-
-
-def is_project_dir(d):
-    return bool(d) and os.path.isdir(os.path.join(d, ".git")) and os.path.isfile(os.path.join(d, "lyrics_player.py"))
-
-
-def guess_project_dir():
-    """このアプリのプロジェクトのフォルダ（git で取ってきたもの）を探す。exe が dist の中にあればその親"""
-    if getattr(sys, "frozen", False):
-        here = os.path.dirname(os.path.abspath(sys.executable))
-        cands = [here, os.path.dirname(here)]
-    else:
-        cands = [os.path.dirname(os.path.abspath(__file__))]
-    cands += [os.path.join(os.path.expanduser("~"), "Documents", n) for n in ("Lyriplayer", "lyrics-player")]
-    return next((d for d in cands if is_project_dir(d)), "")
-
-
-def run_command(args, cwd, timeout=900):
-    """コマンドを画面を出さずに実行して (終了コード, 出力) を返す"""
-    kw = {"creationflags": CREATE_NO_WINDOW} if IS_WIN else {}
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")  # 入力待ちで止まらないように
-    try:
-        r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout, env=env, **kw)
-    except FileNotFoundError:
-        return 127, f"{args[0]} が見つかりません"
-    except subprocess.TimeoutExpired:
-        return 124, "時間がかかりすぎたので中止しました"
-    return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+def version_key(tag):
+    """'v2026.11.18.5' → (2026, 11, 18, 5)。比べられる形にする（読めなければ空）"""
+    return tuple(int(x) for x in re.findall(r"\d+", tag or ""))
 
 
 class UpdateError(Exception):
     pass
 
 
-class GitUpdater:
-    """プロジェクトのフォルダで git を使って、ブランチの確認・切り替えをする"""
-
-    def __init__(self, repo, git=None):
-        self.repo = repo
-        self.git = git or find_git()
-        if not self.git:
-            raise UpdateError("git が見つかりません。Git for Windows をインストールしてください。")
-        if not is_project_dir(repo):
-            raise UpdateError("プロジェクトのフォルダが見つかりません。設定の「アップデート」でフォルダを選んでください。")
-
-    def _git(self, *args, timeout=300):
-        code, out = run_command([self.git, *args], self.repo, timeout)
-        if code != 0:
-            raise UpdateError(f"git {args[0]} でエラーになりました：\n{out[-800:]}")
-        return out
-
-    def fetch(self):
-        self._git("fetch", "origin", "--prune")
-
-    def branches(self):
-        """GitHub 上のブランチ [(名前, 日時, 最後の変更の説明, コミット)]。新しく更新された順"""
-        out = self._git("for-each-ref", "--sort=-committerdate",
-                        "--format=%(refname:short)%09%(committerdate:format:%Y-%m-%d %H:%M)%09%(subject)%09%(objectname)",
-                        "refs/remotes/origin")
-        res = []
-        for ln in out.splitlines():
-            parts = ln.split("\t")
-            if len(parts) != 4 or not parts[0].startswith("origin/") or parts[0] == "origin/HEAD":
-                continue
-            res.append((parts[0][len("origin/"):], parts[1], parts[2], parts[3]))
-        return res
-
-    def target(self, choice):
-        """選んだブランチ（空なら一番新しく更新されたブランチ）→ (名前, コミット)"""
-        br = self.branches()
-        if not br:
-            raise UpdateError("GitHub 上にブランチが見つかりませんでした。")
-        for name, _d, _s, commit in br:
-            if choice and name == choice:
-                return name, commit
-        if choice:
-            raise UpdateError(f"ブランチ「{choice}」が GitHub 上に見つかりません。")
-        return br[0][0], br[0][3]
-
-    def head(self):
-        return self._git("rev-parse", "HEAD")
-
-    def changes(self, current, target):
-        """current から target までの変更の説明（新しい順）。current が分からなければ最近のものを出す"""
-        if current and current == target:
-            return []
-        if current:
-            code, _ = run_command([self.git, "cat-file", "-e", current + "^{commit}"], self.repo, 30)
-            if code == 0:
-                return [ln for ln in self._git("log", "--format=%s", f"{current}..{target}").splitlines() if ln]
-        return [ln for ln in self._git("log", "--format=%s", "-10", target).splitlines() if ln]
-
-    def checkout(self, branch):
-        """ブランチに切り替えて GitHub の最新にそろえる。手で書き換えたファイルがあれば止める"""
-        if self._git("status", "--porcelain", "--untracked-files=no"):
-            raise UpdateError("プロジェクトのフォルダに、書き換えたままのファイルがあるので中止しました。\n"
-                              "（PowerShell で git stash を実行すると、書き換えを一時的によけられます）")
-        code, out = run_command([self.git, "rev-list", "--count", f"origin/{branch}..{branch}"], self.repo, 30)
-        if code == 0 and out.strip() not in ("", "0"):
-            raise UpdateError(f"この PC のブランチ「{branch}」に、GitHub に無い変更があるので中止しました。")
-        self._git("checkout", "-B", branch, f"origin/{branch}")
+def _http_get(url, timeout=30):
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(url, headers={"User-Agent": APP, "Accept": "application/vnd.github+json"})
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise UpdateError("まだ公開されている版がありません。")
+        raise UpdateError(f"GitHub につながりましたが、エラーになりました（{e.code}）。少したってから試してください。")
+    except (urllib.error.URLError, OSError) as e:
+        raise UpdateError(f"GitHub につながりませんでした。インターネットの接続を確かめてください。\n（{e}）")
 
 
-def build_exe(repo, dist):
-    """build_exe.ps1 で exe を作る（必要な部品も入れる）。できた exe のパスを返す"""
-    script = os.path.join(repo, "build_exe.ps1")
-    code, out = run_command(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
-                             "-DistPath", dist, "-Install"], repo, timeout=1800)
-    exe = os.path.join(dist, APP + ".exe")
-    if code != 0 or not os.path.isfile(exe):
-        raise UpdateError("exe を作れませんでした。Python が入っているか確かめてください。\n" + out[-1200:])
-    return exe
+def fetch_latest_release():
+    """Releases の最新版 → {"tag", "name", "notes", "url", "size", "sha256", "page"}"""
+    with _http_get(LATEST_API) as r:
+        try:
+            data = json.loads(r.read().decode("utf-8"))
+        except ValueError:
+            raise UpdateError("GitHub からの返事を読み取れませんでした。")
+    asset = next((a for a in data.get("assets", []) if a.get("name") == UPDATE_ASSET), None)
+    if asset is None:
+        raise UpdateError(f"最新版（{data.get('tag_name', '')}）に {UPDATE_ASSET} が見つかりませんでした。")
+    digest = asset.get("digest") or ""
+    return {"tag": data.get("tag_name", ""), "name": data.get("name") or data.get("tag_name", ""),
+            "notes": (data.get("body") or "").strip(), "url": asset.get("browser_download_url", ""),
+            "size": int(asset.get("size") or 0), "sha256": digest[7:] if digest.startswith("sha256:") else "",
+            "page": data.get("html_url") or RELEASES_URL}
+
+
+def download_release(info, dest, progress=None):
+    """exe をダウンロードして、大きさ（と、わかれば SHA-256）が合っているか確かめる"""
+    import hashlib
+    url = info["url"]
+    if not url.startswith("https://github.com/"):
+        raise UpdateError("ダウンロード先が GitHub ではないので中止しました。")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".part"
+    h, got = hashlib.sha256(), 0
+    with _http_get(url, timeout=60) as r, open(tmp, "wb") as f:
+        total = info["size"] or int(r.headers.get("Content-Length") or 0)
+        last = -1
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
+            h.update(chunk)
+            got += len(chunk)
+            pct = got * 100 // total if total else 0
+            if progress and pct != last:
+                last = pct
+                progress(f"ダウンロードしています… {pct}%")
+    if info["size"] and got != info["size"]:
+        os.remove(tmp)
+        raise UpdateError("ダウンロードが途中で切れたようです。もう一度試してください。")
+    if info["sha256"] and h.hexdigest() != info["sha256"].lower():
+        os.remove(tmp)
+        raise UpdateError("ダウンロードしたファイルが壊れているようです（中身の確認が合いません）。")
+    os.replace(tmp, dest)
+    return dest
 
 
 def launch_swap(new_exe, cur_exe):
@@ -2908,28 +2859,16 @@ class SettingsDialog(QDialog):
         self.verLbl.setWordWrap(True)
         lay.addWidget(self.verLbl)
         row = QHBoxLayout()
-        row.addWidget(QLabel("プロジェクトのフォルダ"))
-        self.repoLbl = QLabel("", objectName="small")
-        self.repoLbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        row.addWidget(self.repoLbl, 1)
-        repoBtn = QPushButton("フォルダを選ぶ…")
-        repoBtn.clicked.connect(self.choose_repo)
-        row.addWidget(repoBtn)
-        lay.addLayout(row)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("取り込むブランチ"))
-        self.branchBox = QComboBox(objectName="sort")
-        self.branchBox.setToolTip("GitHub のどのブランチの版にするか。ふつうは「いちばん新しく更新されたブランチ」で大丈夫です")
-        self.branchBox.activated.connect(self._branch_changed)
-        row.addWidget(self.branchBox, 1)
-        lay.addLayout(row)
-        row = QHBoxLayout()
         self.checkBtn = QPushButton("更新を確認")
         self.checkBtn.clicked.connect(lambda: self.main.check_update())
         self.updateBtn = QPushButton("アップデートする", objectName="primary")
         self.updateBtn.clicked.connect(self.main.run_update)
+        pageBtn = QPushButton("公開ページを開く")
+        pageBtn.setToolTip(RELEASES_URL)
+        pageBtn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(RELEASES_URL)))
         row.addWidget(self.checkBtn)
         row.addWidget(self.updateBtn)
+        row.addWidget(pageBtn)
         row.addStretch(1)
         lay.addLayout(row)
         self.updLbl = QLabel("", objectName="small")
@@ -2939,8 +2878,8 @@ class SettingsDialog(QDialog):
         self.autoUpdChk = QCheckBox("起動したときに更新を確認する（新しい版があれば下の帯でお知らせします）")
         self.autoUpdChk.toggled.connect(lambda on: self.main.settings.setValue("update_auto_check", bool(on)))
         lay.addWidget(self.autoUpdChk)
-        unote = QLabel("この PC に git と Python が入っている必要があります。アップデートでは GitHub から最新版を取り込み、"
-                       "この PC で exe を作り直して入れ替えます（数分かかります）。終わると自動で起動し直します。", objectName="small")
+        unote = QLabel("GitHub で公開している最新版をダウンロードして、今のアプリと入れ替えます。"
+                       "終わると自動で起動し直します。", objectName="small")
         unote.setWordWrap(True)
         lay.addWidget(unote)
 
@@ -3076,49 +3015,19 @@ class SettingsDialog(QDialog):
         v.addLayout(h)
         dlg.exec()
 
-    def choose_repo(self):
-        d = QFileDialog.getExistingDirectory(self, "プロジェクトのフォルダ（lyrics_player.py があるフォルダ）",
-                                             self.main.update_repo() or os.path.expanduser("~"))
-        if not d:
-            return
-        if not is_project_dir(d):
-            QMessageBox.warning(self, APP, "このフォルダは、git で取ってきたプロジェクトのフォルダではないようです。\n"
-                                "lyrics_player.py と .git があるフォルダを選んでください。")
-            return
-        self.main.settings.setValue("update_repo", d)
-        self.main.update_info = None
-        self.refresh_update()
-
-    def _branch_changed(self, i):
-        self.main.settings.setValue("update_branch", self.branchBox.itemData(i) or "")
-        self.main.update_info = None
-        self.main.check_update()
-
     def refresh_update(self):
         m = self.main
         v = app_version()
         if not getattr(sys, "frozen", False):
-            self.verLbl.setText("今のバージョン：Python から起動しています（アップデートでは取り込みだけをして起動し直します）")
-        elif v.get("commit"):
-            self.verLbl.setText(f"今のバージョン：{v['commit'][:7]}（{v.get('date', '')}・{v.get('branch', '')}）")
+            self.verLbl.setText("今のバージョン：Python から起動しています（アップデートは exe 版で使えます）")
+        elif v.get("version"):
+            self.verLbl.setText(f"今のバージョン：{v['version']}（{v.get('date', '')}）")
         else:
-            self.verLbl.setText("今のバージョン：不明（この機能を入れる前に作った exe です。一度アップデートすると表示されます）")
-        repo = m.update_repo()
-        self.repoLbl.setText(repo or "見つかりません — ［フォルダを選ぶ…］で選んでください")
-        choice = m.settings.value("update_branch", "", type=str) or ""
-        self.branchBox.clear()
-        self.branchBox.addItem("いちばん新しく更新されたブランチ（おすすめ）", UPDATE_AUTO_BRANCH)
-        names = [b[0] for b in (m.update_info or {}).get("branches", [])]
-        for name, date, _subj, _c in (m.update_info or {}).get("branches", []):
-            self.branchBox.addItem(f"{name}（{date}）", name)
-        if choice and choice not in names:
-            self.branchBox.addItem(choice, choice)
-        self.branchBox.setCurrentIndex(max(0, self.branchBox.findData(choice)))
+            self.verLbl.setText("今のバージョン：不明（自分で作った exe です。アップデートすると公開版に置き換わります）")
         busy = m._update_task is not None
         info = m.update_info
         self.checkBtn.setEnabled(not busy)
-        self.branchBox.setEnabled(not busy)
-        self.updateBtn.setEnabled(not busy and bool(info and info.get("changes")))
+        self.updateBtn.setEnabled(not busy and bool(info and info.get("newer")) and getattr(sys, "frozen", False))
         self.updLbl.setText(m.update_msg)
         self.autoUpdChk.blockSignals(True)
         self.autoUpdChk.setChecked(m.settings.value("update_auto_check", True, type=bool))
@@ -4405,10 +4314,6 @@ class Main(QMainWindow):
         self._sync_settings()
 
     # ---------------- アップデート
-    def update_repo(self):
-        d = self.settings.value("update_repo", "", type=str) or ""
-        return d if is_project_dir(d) else guess_project_dir()
-
     def _set_update_msg(self, text):
         self.update_msg = text
         if self.settingsDlg is not None and self.settingsDlg.isVisible():
@@ -4421,8 +4326,8 @@ class Main(QMainWindow):
         def finished(res, err):
             self._update_task = None
             done(res, err)
-            task.deleteLater()
         task.finished_with.connect(finished)
+        task.finished.connect(task.deleteLater)  # 片付けは、裏の処理が完全に終わってから
         self._update_task = task
         task.start()
         self._set_update_msg(self.update_msg)
@@ -4431,67 +4336,46 @@ class Main(QMainWindow):
         """GitHub に新しい版があるか確かめる（裏で動かす）"""
         if self._update_task is not None:
             return
-        repo = self.update_repo()
-        choice = self.settings.value("update_branch", "", type=str) or ""
-        frozen = getattr(sys, "frozen", False)
-        built = app_version().get("commit", "")
+        current = app_version().get("version", "")
 
         def work(progress):
-            up = GitUpdater(repo)
-            progress("GitHub から最新の情報を取得しています…")
-            up.fetch()
-            branches = up.branches()
-            name, commit = up.target(choice)
-            current = built if frozen else up.head()
-            return {"branches": branches, "branch": name, "commit": commit, "current": current,
-                    "changes": up.changes(current, commit)}
+            progress("GitHub で最新版を確かめています…")
+            info = fetch_latest_release()
+            info["current"] = current
+            # 版の番号が分からない exe（自分で作ったもの）は、公開版があれば新しいものとして扱う
+            info["newer"] = (not current) or version_key(info["tag"]) > version_key(current)
+            return info
 
         self._start_update_task(work, lambda res, err: self._check_done(res, err, silent))
 
     def _check_done(self, res, err, silent):
         if err:
             self.update_info = None
-            self._set_update_msg("更新を確認できませんでした：" + err)
+            self._set_update_msg("" if silent else "更新を確認できませんでした：" + err)
             return
         self.update_info = res
-        ch = res["changes"]
-        if ch:
-            lines = "\n".join("・" + c for c in ch[:8]) + ("\n・…" if len(ch) > 8 else "")
-            self._set_update_msg(f"新しい版があります（ブランチ：{res['branch']}・{res['commit'][:7]}）\n{lines}")
+        if res["newer"]:
+            notes = "\n".join(ln for ln in res["notes"].splitlines() if ln.strip())[:600]
+            self._set_update_msg(f"新しい版があります：{res['tag']}" + (f"\n{notes}" if notes else ""))
             if silent:
                 self.statusBar().showMessage("Lyriplayer の新しい版があります — 設定 →「アップデート」から更新できます", 20000)
         else:
-            self._set_update_msg(f"最新の版です（ブランチ：{res['branch']}・{res['commit'][:7]}）")
+            self._set_update_msg(f"最新の版です（{res['tag']}）")
 
     def run_update(self):
         info = self.update_info
-        if self._update_task is not None or not (info and info.get("changes")):
+        if self._update_task is not None or not (info and info.get("newer")):
             return
-        repo = self.update_repo()
-        frozen = getattr(sys, "frozen", False)
-        ch = info["changes"]
-        lines = "\n".join("・" + c for c in ch[:10]) + ("\n・…" if len(ch) > 10 else "")
+        if not getattr(sys, "frozen", False):
+            QDesktopServices.openUrl(QUrl(info.get("page") or RELEASES_URL))
+            return
         parent = self.settingsDlg if (self.settingsDlg and self.settingsDlg.isVisible()) else self
-        r = QMessageBox.question(
-            parent, APP,
-            f"ブランチ「{info['branch']}」の最新版に更新します。\n\n{lines}\n\n"
-            + ("この PC で exe を作り直すので、数分かかります（そのあいだも使えます）。\n終わると自動で起動し直します。よろしいですか？"
-               if frozen else "取り込んだあと、起動し直します。よろしいですか？"))
+        r = QMessageBox.question(parent, APP, f"最新版（{info['tag']}）をダウンロードして入れ替えます。\n"
+                                              "終わると自動で起動し直します。よろしいですか？")
         if r != QMessageBox.StandardButton.Yes:
             return
-        branch = info["branch"]
-
-        def work(progress):
-            up = GitUpdater(repo)
-            progress(f"ブランチ「{branch}」を取り込んでいます…")
-            up.fetch()
-            up.checkout(branch)
-            if not frozen:
-                return None
-            progress("exe を作り直しています（数分かかります）…")
-            return build_exe(repo, os.path.join(repo, "build", "update_dist"))
-
-        self._start_update_task(work, self._update_done)
+        dest = os.path.join(tempfile.gettempdir(), "Lyriplayer_update", UPDATE_ASSET)
+        self._start_update_task(lambda progress: download_release(info, dest, progress), self._update_done)
 
     def _update_done(self, exe, err):
         if err:
@@ -4499,11 +4383,8 @@ class Main(QMainWindow):
             QMessageBox.warning(self, APP, "アップデートできませんでした。\n\n" + err)
             return
         self.update_info = None
-        if exe:
-            self._set_update_msg("できました。起動し直します…")
-            launch_swap(exe, sys.executable)
-        else:
-            restart_app()
+        self._set_update_msg("ダウンロードできました。起動し直します…")
+        launch_swap(exe, sys.executable)
         self.close()
         QApplication.quit()
 
