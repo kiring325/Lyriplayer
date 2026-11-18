@@ -11,4 +11,5 @@
 - アプリ内アップデート：`fetch_latest_release()`（GitHub API の releases/latest）→ `download_release()`（大きさと SHA-256 を確認）→ `launch_swap()` で exe を入れ替え。
 - 作業はブランチで行い、プルリクエストで `main` に入れる（`main` に入ると利用者に配られる）。
 - アイコンは画像ファイルを使わず `icon_pixmap()` で描く（24×24 の升目で設計）。他人の素材画像はリポジトリに入れない。
+- README.md は使う人向け（ダウンロード・使い方）。ビルドや公開の手順など開発者向けのことは BUILDING.md に書く。
 - `dist/` `build/` はコミットしない。
