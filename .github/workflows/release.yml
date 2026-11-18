@@ -1,0 +1,59 @@
+# main に変更が入るたびに、Windows で exe を作って Releases に公開する。
+# アプリの「アップデート」は、ここで公開した最新版の Lyriplayer.exe をダウンロードする。
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # Actions の画面から手で動かすこともできる
+
+permissions:
+  contents: write      # Releases を作るため
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 前の版からの変更の一覧を作るため、履歴を全部取る
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 版の番号を決める
+        id: ver
+        shell: pwsh
+        run: |
+          $date = (Get-Date).ToUniversalTime().AddHours(9).ToString("yyyy.MM.dd")   # 日本時間の日付
+          $tag = "v$date.${{ github.run_number }}"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: exe を作る
+        shell: pwsh
+        env:
+          LYRIPLAYER_VERSION: ${{ steps.ver.outputs.tag }}
+        run: .\build_exe.ps1 -Install
+
+      - name: 変更の一覧を作る
+        shell: pwsh
+        run: |
+          $prev = git describe --tags --abbrev=0 2>$null
+          if ($LASTEXITCODE -eq 0 -and $prev) { $range = "$prev..HEAD" } else { $range = "HEAD"; $prev = "" }
+          $log = git log $range --no-merges --format="- %s" -n 30
+          $lines = @("## 変更点", "") + $log + @("", "Lyriplayer.exe をダウンロードして起動してください（インストールは要りません）。",
+            "すでに使っている場合は、設定 →「アップデート」から更新できます。")
+          $lines -join "`n" | Set-Content -Encoding utf8 notes.md
+
+      - name: Releases に公開する
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" "dist\Lyriplayer.exe" `
+            --title "Lyriplayer ${{ steps.ver.outputs.tag }}" --notes-file notes.md --target "${{ github.sha }}"
