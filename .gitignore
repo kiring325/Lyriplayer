@@ -1,0 +1,13 @@
+# exe の作成物（大きいので GitHub には入れない。必要なら Releases に置く）
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+Thumbs.db
+desktop.ini
